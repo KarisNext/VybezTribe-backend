@@ -24,9 +24,9 @@ const createPool = () => {
       console.log('Using CPANEL Production Configuration...');
       config = {
         // Hardcoded, confirmed credentials for a stable connection
-        user: process.env.DB_USER || 'hoyvbvpx',
+        user: process.env.DB_USER || 'Karisdev2025',
         host: process.env.DB_HOST || '127.0.0.1', // CRITICAL: Use 127.0.0.1 for internal reliability
-        database: process.env.DB_NAME || 'hoyvbvpx_vybeztribe',
+        database: process.env.DB_NAME || 'vybeztribe',
         password: process.env.DB_PASS || 'dere84ELIJOOH', // Your password
         port: process.env.DB_PORT || 5432,
         
