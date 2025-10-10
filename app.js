@@ -1,4 +1,4 @@
-// backend/app.js - Production Ready for Localhost & Render
+// backend/app.js - Fixed for Render Deployment
 const express = require('express');
 const cors = require('cors');
 const session = require('express-session');
@@ -21,12 +21,13 @@ testConnection().then(connected => {
   process.exit(1);
 });
 
-// CORS configuration - Works for both localhost and Render
+// FIXED CORS configuration for Render
 const allowedOrigins = process.env.NODE_ENV === 'production' 
   ? [
       'https://vybeztribe.com', 
       'https://www.vybeztribe.com',
-      process.env.FRONTEND_URL // Add your Render frontend URL
+      'https://vybeztribe-frontend.onrender.com', // Add your actual Render frontend URL
+      process.env.FRONTEND_URL
     ].filter(Boolean)
   : [
       'http://localhost:3000', 
@@ -35,34 +36,40 @@ const allowedOrigins = process.env.NODE_ENV === 'production'
       'http://localhost:3001'
     ];
 
+console.log('Allowed Origins:', allowedOrigins);
+
 app.use(cors({
   origin: function(origin, callback) {
-    // Allow requests with no origin (mobile apps, Postman, etc.)
+    console.log('Request Origin:', origin); // Debug logging
+    
+    // Allow requests with no origin (mobile apps, Postman, server-to-server)
     if (!origin) return callback(null, true);
     
-    if (allowedOrigins.indexOf(origin) !== -1 || process.env.NODE_ENV === 'development') {
+    // Check if origin is in allowed list
+    if (allowedOrigins.indexOf(origin) !== -1) {
+      callback(null, true);
+    } else if (process.env.NODE_ENV === 'development') {
       callback(null, true);
     } else {
+      console.error('CORS blocked origin:', origin);
       callback(new Error('Not allowed by CORS'));
     }
   },
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-CSRF-Token', 'Cookie'],
   exposedHeaders: ['Set-Cookie']
 }));
 
-// Trust proxy for Render deployment
-if (process.env.NODE_ENV === 'production') {
-  app.set('trust proxy', 1);
-}
+// Trust proxy for Render deployment - CRITICAL for sessions
+app.set('trust proxy', 1);
 
 // Body parsing middleware
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
-// Session middleware for admin
+// FIXED Session middleware for admin
 const adminSessionMiddleware = session({
   store: new pgSession({
     pool: getPool(),
@@ -73,17 +80,18 @@ const adminSessionMiddleware = session({
   resave: false,
   saveUninitialized: false,
   cookie: {
-    secure: process.env.NODE_ENV === 'production',
+    secure: process.env.NODE_ENV === 'production', // true in production
     httpOnly: true,
     maxAge: 8 * 60 * 60 * 1000, // 8 hours
-    sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
-    domain: process.env.NODE_ENV === 'production' ? process.env.COOKIE_DOMAIN : undefined
+    sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax', // 'none' for cross-origin
+    path: '/'
   },
   name: 'vybeztribe_admin_session',
-  rolling: true
+  rolling: true,
+  proxy: true // IMPORTANT: Trust the reverse proxy
 });
 
-// Session middleware for public/client
+// FIXED Session middleware for public/client
 const publicSessionMiddleware = session({
   store: new pgSession({
     pool: getPool(),
@@ -98,17 +106,18 @@ const publicSessionMiddleware = session({
     httpOnly: true,
     maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
     sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
-    domain: process.env.NODE_ENV === 'production' ? process.env.COOKIE_DOMAIN : undefined
+    path: '/'
   },
   name: 'vybeztribe_public_session',
-  rolling: true
+  rolling: true,
+  proxy: true
 });
 
 // ============================================
 // CLIENT API ROUTE HANDLERS
 // ============================================
 
-// Client category route handler - FIXED: Removed content field
+// Client category route handler
 const handleClientCategory = async (req, res) => {
   try {
     const { slug, type = 'news', page = 1, limit = 20 } = req.query;
@@ -122,7 +131,6 @@ const handleClientCategory = async (req, res) => {
 
     const pool = getPool();
     
-    // Get category info
     const categoryQuery = `
       SELECT category_id, name, slug, description, color, icon, active
       FROM categories 
@@ -145,7 +153,6 @@ const handleClientCategory = async (req, res) => {
       const limitNum = Math.min(50, Math.max(1, parseInt(limit)));
       const offset = (pageNum - 1) * limitNum;
       
-      // Get total count
       const countQuery = `
         SELECT COUNT(*) as total
         FROM news n
@@ -155,7 +162,6 @@ const handleClientCategory = async (req, res) => {
       const countResult = await pool.query(countQuery, [category.category_id]);
       const totalNews = parseInt(countResult.rows[0].total);
       
-      // Get news articles - FIXED: Removed n.content
       const newsQuery = `
         SELECT 
           n.news_id,
@@ -207,7 +213,6 @@ const handleClientCategory = async (req, res) => {
         }
       });
     } else if (type === 'stats') {
-      // Get category stats
       const statsQuery = `
         SELECT 
           COUNT(*) as total_articles,
@@ -368,7 +373,6 @@ const handleClientHome = async (req, res) => {
         categories: result.rows
       });
     } else {
-      // Return all home data
       const baseQuery = `
         SELECT 
           n.news_id,
@@ -399,7 +403,6 @@ const handleClientHome = async (req, res) => {
         pool.query(`SELECT * FROM categories WHERE active = true ORDER BY COALESCE(order_index, 999) ASC`)
       ]);
       
-      // Get category previews
       const categoryPreviews = {};
       const mainCategories = ['politics', 'counties', 'opinion', 'business', 'sports', 'technology'];
       
@@ -489,7 +492,6 @@ const handleClientArticle = async (req, res) => {
       });
     }
     
-    // Increment view count
     await pool.query(
       'UPDATE news SET views = COALESCE(views, 0) + 1 WHERE slug = $1',
       [slug]
@@ -524,23 +526,18 @@ const clientAuthRoutes = require('./routes/client/auth.js');
 // MOUNT ROUTES
 // ============================================
 
-// Admin routes
 app.use('/api/admin/auth', adminSessionMiddleware, authRoutes);
 app.use('/api/admin/users', adminSessionMiddleware, usersRoutes);
-
-// Public API routes
 app.use('/api/news', newsRoutes);
 app.use('/api/articles', articlesRoutes);
 app.use('/api/categories', categoriesRoutes);
 app.use('/api/retrieve', adminSessionMiddleware, retrieveRoutes);
 app.use('/api/client/auth', publicSessionMiddleware, clientAuthRoutes);
 
-// Client API routes
 app.get('/api/client/category', publicSessionMiddleware, handleClientCategory);
 app.get('/api/client/home', publicSessionMiddleware, handleClientHome);
 app.get('/api/client/article', publicSessionMiddleware, handleClientArticle);
 
-// Legacy fetch endpoint
 app.get('/api/client/fetch', publicSessionMiddleware, async (req, res) => {
   const { type, ...params } = req.query;
   
@@ -610,7 +607,6 @@ app.get('/api/test', (req, res) => {
 // ERROR HANDLERS
 // ============================================
 
-// 404 handler for client routes
 app.use('/api/client/*', (req, res) => {
   res.status(404).json({ 
     success: false, 
@@ -618,7 +614,6 @@ app.use('/api/client/*', (req, res) => {
   });
 });
 
-// Global 404 handler
 app.use('*', (req, res) => {
   res.status(404).json({
     success: false,
@@ -627,7 +622,6 @@ app.use('*', (req, res) => {
   });
 });
 
-// Global error handler
 app.use((err, req, res, next) => {
   console.error('Global error handler:', err);
   res.status(500).json({
@@ -650,6 +644,7 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`Port: ${PORT}`);
   console.log(`Database: ${process.env.DB_NAME || 'vybeztribe'}`);
+  console.log(`Allowed Origins: ${allowedOrigins.join(', ')}`);
   console.log('\nClient Routes Active:');
   console.log('  /api/client/category?slug=:slug');
   console.log('  /api/client/home?type=:type');
