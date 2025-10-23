@@ -1,61 +1,55 @@
 // backend/routes/client/auth.js
 const express = require("express");
 const crypto = require("crypto");
-const { getPool } = require("../../config/db");
 
 const router = express.Router();
-
-const generateClientId = () => {
-  return 'client_' + crypto.randomBytes(24).toString('hex') + '_' + Date.now();
-};
 
 const generateCSRFToken = () => {
   return crypto.randomBytes(32).toString('hex');
 };
 
-const validateClientSession = async (clientId) => {
-  if (!clientId || !clientId.startsWith('client_')) return null;
-  
-  const pool = getPool();
-  const result = await pool.query(
-    'SELECT * FROM user_sessions WHERE session_id = $1 AND is_active = true AND expires_at > NOW()',
-    [clientId]
-  );
-  return result.rows[0] || null;
-};
-
 router.post("/anonymous", async (req, res) => {
   try {
-    const pool = getPool();
-    const clientId = generateClientId();
-    const csrfToken = generateCSRFToken();
-    const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
-    const userAgent = req.headers['user-agent'] || 'Unknown';
-    const ipAddress = req.ip || req.connection.remoteAddress || 'Unknown';
-
-    await pool.query(`
-      INSERT INTO user_sessions (session_id, user_id, ip_address, user_agent, last_activity, created_at, expires_at, is_active) 
-      VALUES ($1, NULL, $2, $3, NOW(), NOW(), $4, true)
-    `, [clientId, ipAddress, userAgent, expiresAt]);
-
-    res.cookie('vybeztribe_client_session', clientId, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
-      maxAge: 30 * 24 * 60 * 60 * 1000,
-      domain: process.env.NODE_ENV === 'production' ? '.vybeztribe.com' : undefined,
+    console.log('Creating anonymous session:', {
+      hasSession: !!req.session,
+      sessionId: req.session?.id
     });
 
-    console.log('Anonymous session created:', clientId);
+    // Mark session as anonymous
+    req.session.isAnonymous = true;
+    req.session.createdAt = new Date().toISOString();
+    req.session.userAgent = req.headers['user-agent'] || 'Unknown';
+    req.session.ipAddress = req.ip || req.connection.remoteAddress || 'Unknown';
 
-    return res.json({
-      success: true,
-      isAuthenticated: true,
-      isAnonymous: true,
-      user: null,
-      client_id: clientId,
-      csrf_token: csrfToken,
-      message: 'Anonymous session created'
+    const csrfToken = generateCSRFToken();
+    req.session.csrfToken = csrfToken;
+
+    // Save session explicitly
+    req.session.save((err) => {
+      if (err) {
+        console.error('Session save error:', err);
+        return res.status(500).json({
+          success: false,
+          isAuthenticated: false,
+          isAnonymous: true,
+          user: null,
+          client_id: null,
+          csrf_token: csrfToken,
+          message: 'Failed to create session'
+        });
+      }
+
+      console.log('Anonymous session created successfully:', req.session.id);
+
+      return res.json({
+        success: true,
+        isAuthenticated: true,
+        isAnonymous: true,
+        user: null,
+        client_id: req.session.id,
+        csrf_token: csrfToken,
+        message: 'Anonymous session created'
+      });
     });
 
   } catch (error) {
@@ -74,61 +68,44 @@ router.post("/anonymous", async (req, res) => {
 
 router.get("/verify", async (req, res) => {
   try {
-    const pool = getPool();
-    
-    // Clean up expired sessions
-    await pool.query(`
-      UPDATE user_sessions 
-      SET is_active = false 
-      WHERE expires_at < NOW() AND is_active = true
-    `);
+    console.log('Client session verification:', {
+      hasSession: !!req.session,
+      sessionId: req.session?.id,
+      isAnonymous: req.session?.isAnonymous
+    });
 
-    const clientId = req.cookies?.['vybeztribe_client_session'];
-    
-    console.log('Client session verification for:', clientId);
-    
-    if (!clientId) {
+    // If no session or session is not initialized
+    if (!req.session || !req.session.id) {
       return res.status(401).json({
         success: false,
         isAuthenticated: false,
         isAnonymous: true,
         user: null,
         client_id: null,
-        csrf_token: generateCSRFToken(),
+        csrf_token: null,
         message: 'No session found'
       });
     }
 
-    const session = await validateClientSession(clientId);
-    
-    if (!session) {
-      res.clearCookie('vybeztribe_client_session');
-      return res.status(401).json({
-        success: false,
-        isAuthenticated: false,
-        isAnonymous: true,
-        user: null,
-        client_id: null,
-        csrf_token: generateCSRFToken(),
-        message: 'Invalid session'
-      });
+    // Mark as anonymous if not already set
+    if (req.session.isAnonymous === undefined) {
+      req.session.isAnonymous = true;
+      req.session.createdAt = new Date().toISOString();
     }
 
-    // Update session activity
-    await pool.query(
-      'UPDATE user_sessions SET last_activity = NOW() WHERE session_id = $1',
-      [clientId]
-    );
+    const csrfToken = generateCSRFToken();
+    req.session.csrfToken = csrfToken;
 
-    console.log('Client session verified:', clientId);
+    // Get user data if userId exists
+    const user = req.session.userId ? await getUserData(req.session.userId) : null;
 
     return res.json({
       success: true,
       isAuthenticated: true,
-      isAnonymous: session.user_id === null,
-      user: session.user_id ? await getUserData(session.user_id, pool) : null,
-      client_id: clientId,
-      csrf_token: generateCSRFToken(),
+      isAnonymous: req.session.isAnonymous !== false,
+      user: user,
+      client_id: req.session.id,
+      csrf_token: csrfToken,
       message: 'Session verified'
     });
 
@@ -140,7 +117,7 @@ router.get("/verify", async (req, res) => {
       isAnonymous: true,
       user: null,
       client_id: null,
-      csrf_token: generateCSRFToken(),
+      csrf_token: null,
       message: 'Verification failed'
     });
   }
@@ -148,47 +125,38 @@ router.get("/verify", async (req, res) => {
 
 router.post("/refresh", async (req, res) => {
   try {
-    const clientId = req.cookies?.['vybeztribe_client_session'];
-    const pool = getPool();
+    console.log('Client session refresh:', {
+      hasSession: !!req.session,
+      sessionId: req.session?.id
+    });
     
-    if (!clientId) {
+    if (!req.session || !req.session.id) {
       return res.status(401).json({
         success: false,
         message: 'No session to refresh'
       });
     }
 
-    const session = await validateClientSession(clientId);
-    
-    if (!session) {
-      res.clearCookie('vybeztribe_client_session');
-      return res.status(401).json({
-        success: false,
-        message: 'Invalid session'
+    // Update timestamp
+    req.session.lastRefresh = new Date().toISOString();
+    const csrfToken = generateCSRFToken();
+    req.session.csrfToken = csrfToken;
+
+    req.session.save((err) => {
+      if (err) {
+        console.error('Session refresh save error:', err);
+        return res.status(500).json({
+          success: false,
+          message: 'Refresh failed'
+        });
+      }
+
+      return res.json({
+        success: true,
+        client_id: req.session.id,
+        csrf_token: csrfToken,
+        message: 'Session refreshed'
       });
-    }
-
-    const newExpiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
-    await pool.query(
-      'UPDATE user_sessions SET expires_at = $1, last_activity = NOW() WHERE session_id = $2',
-      [newExpiry, clientId]
-    );
-
-    res.cookie('vybeztribe_client_session', clientId, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
-      maxAge: 30 * 24 * 60 * 60 * 1000,
-      domain: process.env.NODE_ENV === 'production' ? '.vybeztribe.com' : undefined,
-    });
-
-    console.log('Client session refreshed:', clientId);
-
-    return res.json({
-      success: true,
-      client_id: clientId,
-      csrf_token: generateCSRFToken(),
-      message: 'Session refreshed'
     });
 
   } catch (error) {
@@ -202,27 +170,29 @@ router.post("/refresh", async (req, res) => {
 
 router.post("/logout", async (req, res) => {
   try {
-    const clientId = req.cookies?.['vybeztribe_client_session'];
-    const pool = getPool();
+    console.log('Client session logout:', {
+      sessionId: req.session?.id
+    });
     
-    if (clientId) {
-      await pool.query(
-        'UPDATE user_sessions SET is_active = false WHERE session_id = $1',
-        [clientId]
-      );
-      console.log('Client session deactivated:', clientId);
-    }
-
-    res.clearCookie('vybeztribe_client_session');
-    
-    return res.json({
-      success: true,
-      message: 'Session terminated'
+    req.session.destroy(err => {
+      if (err) {
+        console.error('Client session destroy error:', err);
+        return res.json({
+          success: true,
+          message: 'Session cleared locally'
+        });
+      }
+      
+      res.clearCookie('vybeztribe_public_session');
+      
+      return res.json({
+        success: true,
+        message: 'Session terminated'
+      });
     });
 
   } catch (error) {
     console.error('Client logout error:', error);
-    res.clearCookie('vybeztribe_client_session');
     return res.json({
       success: true,
       message: 'Session cleared'
@@ -230,8 +200,10 @@ router.post("/logout", async (req, res) => {
   }
 });
 
-const getUserData = async (userId, pool) => {
+const getUserData = async (userId) => {
   try {
+    const { getPool } = require('../../config/db');
+    const pool = getPool();
     const result = await pool.query(
       'SELECT user_id as id, email, first_name, last_name FROM users WHERE user_id = $1',
       [userId]
