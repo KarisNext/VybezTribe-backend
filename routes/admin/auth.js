@@ -1,296 +1,292 @@
-// backend/routes/admin/auth.js
+// backend/routes/admin/auth.js - COMPLETE FIXED VERSION
 const express = require('express');
-const bcrypt = require('bcryptjs');
+const bcrypt = require('bcrypt');
 const { getPool } = require('../../config/db');
+
 const router = express.Router();
 
-// Login Route
+// ============================================
+// ADMIN LOGIN
+// ============================================
 router.post('/login', async (req, res) => {
-  let pool;
   try {
-    pool = getPool();
-    
-    const { identifier, email, password } = req.body;
-    
-    const loginField = identifier || email;
+    const { identifier, password } = req.body;
 
-    if (!loginField || !password) {
+    console.log('Admin login attempt:', {
+      identifier,
+      hasPassword: !!password,
+      sessionId: req.session?.id
+    });
+
+    // Validate input
+    if (!identifier || !password) {
       return res.status(400).json({
         success: false,
         authenticated: false,
         user: null,
-        error: 'Username/email and password are required',
-        message: null
+        error: 'Email/username and password are required',
+        message: 'Missing credentials'
       });
     }
 
-    const trimmedIdentifier = loginField.trim();
-    const trimmedPassword = password.trim();
+    const pool = getPool();
 
-    if (!trimmedIdentifier || !trimmedPassword) {
-      return res.status(400).json({
-        success: false,
-        authenticated: false,
-        user: null,
-        error: 'Username/email and password cannot be empty',
-        message: null
-      });
-    }
+    // Find admin by email or username
+    const adminQuery = `
+      SELECT 
+        admin_id, first_name, last_name, email, phone, 
+        username, role, password_hash, permissions, status
+      FROM admins 
+      WHERE (email = $1 OR username = $1) AND status = 'active'
+      LIMIT 1
+    `;
 
-    if (trimmedPassword.length < 6) {
-      return res.status(400).json({
-        success: false,
-        authenticated: false,
-        user: null,
-        error: 'Password must be at least 6 characters',
-        message: null
-      });
-    }
-
-    console.log('Admin login attempt for:', trimmedIdentifier);
-
-    let adminResult;
-    try {
-      adminResult = await pool.query(
-        `SELECT admin_id, first_name, last_name, email, phone, role, permissions, 
-                password_hash, last_login, status, username
-         FROM admins 
-         WHERE (email = $1 OR phone = $1 OR username = $1) AND status = 'active'
-         LIMIT 1`,
-        [trimmedIdentifier]
-      );
-    } catch (error) {
-      if (error.message && error.message.includes('username')) {
-        console.log('Username column not found, trying without it...');
-        adminResult = await pool.query(
-          `SELECT admin_id, first_name, last_name, email, phone, role, permissions,
-                  password_hash, last_login, status
-           FROM admins 
-           WHERE (email = $1 OR phone = $1) AND status = 'active'
-           LIMIT 1`,
-          [trimmedIdentifier]
-        );
-      } else {
-        throw error;
-      }
-    }
-
-    console.log('Admin query result:', adminResult.rows.length > 0 ? 'Found admin' : 'No admin found');
+    const adminResult = await pool.query(adminQuery, [identifier.trim()]);
 
     if (adminResult.rows.length === 0) {
+      console.log('Admin not found or inactive:', identifier);
       return res.status(401).json({
         success: false,
         authenticated: false,
         user: null,
         error: 'Invalid credentials',
-        message: null
+        message: 'Email/username or password is incorrect'
       });
     }
 
     const admin = adminResult.rows[0];
-    console.log('Found admin with role:', admin.role);
 
-    const isValidPassword = await bcrypt.compare(trimmedPassword, admin.password_hash);
-    console.log('Password validation result:', isValidPassword);
+    // Verify password
+    const passwordMatch = await bcrypt.compare(password.trim(), admin.password_hash);
 
-    if (!isValidPassword) {
+    if (!passwordMatch) {
+      console.log('Invalid password for admin:', identifier);
       return res.status(401).json({
         success: false,
         authenticated: false,
         user: null,
         error: 'Invalid credentials',
-        message: null
+        message: 'Email/username or password is incorrect'
       });
     }
 
-    // Regenerate session ID on login for security
-    req.session.regenerate(async (err) => {
+    // Update last login
+    await pool.query(
+      'UPDATE admins SET last_login = CURRENT_TIMESTAMP WHERE admin_id = $1',
+      [admin.admin_id]
+    );
+
+    // Create admin session
+    req.session.adminId = admin.admin_id;
+    req.session.role = admin.role;
+    req.session.email = admin.email;
+    req.session.isAdmin = true;
+
+    // Save session explicitly
+    req.session.save((err) => {
       if (err) {
-        console.error('Session regeneration error:', err);
-        return res.status(500).json({ 
-          success: false, 
-          authenticated: false,
-          user: null,
-          error: 'Could not create session',
-          message: 'Session creation failed'
-        });
-      }
-
-      try {
-        // Store admin ID in session - express-session handles the rest
-        req.session.adminId = admin.admin_id;
-        req.session.loginTime = new Date().toISOString();
-        
-        // Update last login in database
-        await pool.query(
-          'UPDATE admins SET last_login = NOW() WHERE admin_id = $1',
-          [admin.admin_id]
-        );
-        
-        console.log('Admin login successful:', {
-          adminId: admin.admin_id,
-          email: admin.email,
-          role: admin.role
-        });
-        
-        const userResponse = {
-          admin_id: admin.admin_id,
-          first_name: admin.first_name,
-          last_name: admin.last_name,
-          email: admin.email,
-          phone: admin.phone,
-          role: admin.role,
-          permissions: admin.permissions || [],
-          last_login: new Date().toISOString(),
-          status: admin.status
-        };
-
-        return res.status(200).json({
-          success: true,
-          authenticated: true,
-          user: userResponse,
-          csrf_token: null,
-          error: null,
-          message: 'Login successful'
-        });
-      } catch (updateError) {
-        console.error('Error updating last login:', updateError);
+        console.error('Session save error:', err);
         return res.status(500).json({
           success: false,
           authenticated: false,
           user: null,
-          error: 'Login processing failed',
-          message: null
+          error: 'Failed to create session',
+          message: 'Session creation failed'
         });
       }
+
+      // Remove sensitive data
+      delete admin.password_hash;
+
+      console.log('Admin login successful:', {
+        adminId: admin.admin_id,
+        email: admin.email,
+        role: admin.role,
+        sessionId: req.session.id
+      });
+
+      return res.json({
+        success: true,
+        authenticated: true,
+        user: admin,
+        error: null,
+        message: 'Login successful',
+        csrfToken: req.session.id
+      });
     });
 
   } catch (error) {
-    console.error('Login error details:', {
-      message: error.message,
-      stack: error.stack,
-      code: error.code
-    });
+    console.error('Admin login error:', error);
     return res.status(500).json({
       success: false,
       authenticated: false,
       user: null,
-      error: 'Internal server error',
-      message: 'Login failed due to server error'
+      error: 'Login failed',
+      message: 'Internal server error'
     });
   }
 });
 
-// Logout Route
-router.post('/logout', (req, res) => {
-  console.log('Admin logout attempt for session:', req.session.id);
-  
-  req.session.destroy(err => {
-    if (err) {
-      console.error('Session destroy error:', err);
-      return res.status(500).json({ 
-        success: false, 
-        authenticated: false,
-        user: null,
-        error: 'Could not log out, please try again',
-        message: null
-      });
-    }
-    
-    console.log('Admin logout successful - session destroyed');
-    
-    res.status(200).json({ 
-      success: true, 
-      authenticated: false,
-      user: null,
-      error: null,
-      message: 'Logout successful' 
-    });
-  });
-});
-
-// Verify Route
+// ============================================
+// ADMIN VERIFY SESSION
+// ============================================
 router.get('/verify', async (req, res) => {
   try {
-    const pool = getPool();
-    
-    const adminId = req.session?.adminId;
-
-    console.log('Admin session verification:', {
+    console.log('Admin session verify:', {
       hasSession: !!req.session,
-      hasAdminId: !!adminId,
-      sessionId: req.session?.id
+      sessionId: req.session?.id,
+      hasAdminId: !!req.session?.adminId,
+      adminId: req.session?.adminId
     });
 
-    if (!adminId) {
+    // Check if admin session exists
+    if (!req.session || !req.session.adminId) {
       return res.status(401).json({
         success: false,
         authenticated: false,
         user: null,
-        csrf_token: null,
-        error: 'No active session found',
-        message: null
+        error: null,
+        message: 'No admin session found'
       });
     }
 
-    const adminResult = await pool.query(
-      `SELECT admin_id, first_name, last_name, email, phone, role, permissions, 
-              last_login, status
-       FROM admins 
-       WHERE admin_id = $1 AND status = 'active'
-       LIMIT 1`,
-      [adminId]
-    );
+    const pool = getPool();
 
-    console.log('Admin verification query result:', adminResult.rows.length > 0 ? 'Valid admin found' : 'Admin not found/inactive');
+    // Verify admin still exists and is active
+    const adminQuery = `
+      SELECT 
+        admin_id, first_name, last_name, email, phone, 
+        role, permissions, last_login, status
+      FROM admins 
+      WHERE admin_id = $1 AND status = 'active'
+      LIMIT 1
+    `;
+
+    const adminResult = await pool.query(adminQuery, [req.session.adminId]);
 
     if (adminResult.rows.length === 0) {
-      req.session.destroy((err) => {
-        if (err) console.error('Error destroying invalid session:', err);
-      });
+      console.log('Admin no longer active, destroying session');
       
+      req.session.destroy((err) => {
+        if (err) console.error('Session destroy error:', err);
+      });
+
       return res.status(401).json({
         success: false,
         authenticated: false,
         user: null,
-        csrf_token: null,
-        error: 'Invalid or expired session',
-        message: null
+        error: 'Session expired',
+        message: 'Admin account no longer active'
       });
     }
 
     const admin = adminResult.rows[0];
 
-    console.log('Admin session verified successfully for:', admin.admin_id, 'with role:', admin.role);
+    console.log('Admin session verified:', {
+      adminId: admin.admin_id,
+      email: admin.email,
+      role: admin.role
+    });
 
-    return res.status(200).json({
+    return res.json({
       success: true,
       authenticated: true,
-      user: {
-        admin_id: admin.admin_id,
-        first_name: admin.first_name,
-        last_name: admin.last_name,
-        email: admin.email,
-        phone: admin.phone,
-        role: admin.role,
-        permissions: admin.permissions || [],
-        last_login: admin.last_login,
-        status: admin.status
-      },
-      csrf_token: null,
+      user: admin,
       error: null,
-      message: 'Session verified'
+      message: 'Session valid',
+      csrfToken: req.session.id
     });
 
   } catch (error) {
-    console.error('Admin session verification error:', error);
+    console.error('Admin verify error:', error);
     return res.status(500).json({
       success: false,
       authenticated: false,
       user: null,
-      csrf_token: null,
-      error: 'Session verification failed',
+      error: 'Verification failed',
       message: 'Internal server error'
+    });
+  }
+});
+
+// ============================================
+// ADMIN LOGOUT
+// ============================================
+router.post('/logout', async (req, res) => {
+  try {
+    console.log('Admin logout:', {
+      sessionId: req.session?.id,
+      adminId: req.session?.adminId
+    });
+
+    if (req.session) {
+      req.session.destroy((err) => {
+        if (err) {
+          console.error('Session destroy error:', err);
+          return res.json({
+            success: true,
+            message: 'Logged out with errors'
+          });
+        }
+
+        res.clearCookie('vybeztribe_admin_session');
+        
+        return res.json({
+          success: true,
+          message: 'Logged out successfully'
+        });
+      });
+    } else {
+      return res.json({
+        success: true,
+        message: 'No session to logout'
+      });
+    }
+
+  } catch (error) {
+    console.error('Admin logout error:', error);
+    return res.json({
+      success: true,
+      message: 'Logged out'
+    });
+  }
+});
+
+// ============================================
+// ADMIN REFRESH SESSION
+// ============================================
+router.post('/refresh', async (req, res) => {
+  try {
+    if (!req.session || !req.session.adminId) {
+      return res.status(401).json({
+        success: false,
+        message: 'No session to refresh'
+      });
+    }
+
+    req.session.touch();
+    
+    req.session.save((err) => {
+      if (err) {
+        console.error('Session refresh error:', err);
+        return res.status(500).json({
+          success: false,
+          message: 'Refresh failed'
+        });
+      }
+
+      return res.json({
+        success: true,
+        message: 'Session refreshed',
+        csrfToken: req.session.id
+      });
+    });
+
+  } catch (error) {
+    console.error('Admin refresh error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Refresh failed'
     });
   }
 });
