@@ -1,4 +1,4 @@
-// backend/routes/client/auth.js
+// backend/middleware/clientAuth.js
 const express = require("express");
 const crypto = require("crypto");
 
